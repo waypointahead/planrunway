@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "planrunway"
+version = "0.3.1"
+description = "Local specification-driven development core"
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+classifiers = [
+  "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/waypointahead/planrunway"
+Issues = "https://github.com/waypointahead/planrunway/issues"
+Releases = "https://github.com/waypointahead/planrunway/releases"
+
+[project.scripts]
+planrunway = "planrunway.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+planrunway = ["runtime/planrunway", "runtime/ground_rules.md"]
