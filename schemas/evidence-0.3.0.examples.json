@@ -1,0 +1,27 @@
+[
+  {
+    "name": "git-final",
+    "repository": {"kind": "git", "base_revision": "abc", "observed_head": "def", "changed_files": ["src/a.py"], "patch_sha256": "0123"},
+    "expected": "valid"
+  },
+  {
+    "name": "non-git-final",
+    "repository": {"kind": "non_git", "file_snapshot_sha256": "0123"},
+    "expected": "valid"
+  },
+  {
+    "name": "manual-confirmation",
+    "event": {"kind": "manual_confirmation", "decision": "confirmed", "operator": "reviewer", "notes": "passed"},
+    "expected": "valid"
+  },
+  {
+    "name": "external-artifact",
+    "artifact": {"type": "coverage-report", "path": "reports/coverage.xml", "sha256": "0123", "description": "coverage"},
+    "expected": "valid-only-when-policy-allows"
+  },
+  {
+    "name": "incomplete-evidence",
+    "missing": ["criterion result", "required check result"],
+    "expected": "invalid"
+  }
+]

@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+
+VERSION = "0.3.1"
+SCHEMA_VERSION = "0.4.0"
+
+
+def semver(value: object) -> tuple[int, int, int]:
+    if not isinstance(value, str):
+        raise ValueError("version must be a semantic version")
+    parts = value.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise ValueError("version must be a semantic version")
+    return tuple(int(part) for part in parts)  # type: ignore[return-value]
+
+
+def main() -> int:
+    if len(sys.argv) not in (2, 4) or sys.argv[1] not in {"lint", "status"}:
+        print("Usage: planrunway <lint|status> [--root PATH]", file=sys.stderr)
+        return 2
+    root = Path(".")
+    if len(sys.argv) == 4:
+        if sys.argv[2] != "--root":
+            print("Usage: planrunway <lint|status> [--root PATH]", file=sys.stderr)
+            return 2
+        root = Path(sys.argv[3])
+    state = root.resolve() / ".prway"
+    try:
+        canonical = []
+        for pattern in ("meta/milestones/*.json", "meta/tasks/*.json", "execution/tasks/*.json", "execution/runs/*/final_run.json"):
+            canonical.extend(state.glob(pattern))
+        marked = next((path for path in canonical if path.is_file() and any(marker in path.read_bytes() for marker in (b"<<<<<<<", b"=======", b">>>>>>>"))), None)
+        if marked is not None:
+            raise ValueError(
+                "HUMAN_INTERVENTION_REQUIRED: unresolved PlanRunway conflict at "
+                f"{marked.relative_to(root.resolve())}. Run: planrunway conflict-resolve --root ."
+            )
+        envelope = json.loads((state / "compatibility.json").read_text(encoding="utf-8"))
+        config = json.loads((state / "config.json").read_text(encoding="utf-8"))
+        if not isinstance(envelope, dict) or envelope.get("format_version") != 1:
+            raise ValueError("Unsupported compatibility envelope format")
+        release_url = envelope.get("release_url")
+        if not isinstance(release_url, str) or not release_url.startswith("https://"):
+            raise ValueError("Invalid compatibility envelope: missing release_url")
+        if semver(VERSION) < semver(envelope.get("minimum_cli_version")):
+            raise ValueError(
+                f"PlanRunway CLI {VERSION} is below required {envelope['minimum_cli_version']}. "
+                f"Install a compatible release from: {release_url}"
+            )
+        if config.get("tier_id") != "manual-core":
+            raise ValueError("Unsupported MS3 automation profile")
+        metadata = json.loads((state / "meta" / "plan.json").read_text(encoding="utf-8"))
+        if metadata != {"schema_version": SCHEMA_VERSION}:
+            raise ValueError("Unsupported canonical planning metadata format")
+        milestones = []
+        for path in sorted((state / "meta" / "milestones").glob("*.json")):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or record.get("kind") != "milestone" or record.get("model_id") != path.stem:
+                raise ValueError("Canonical milestone record is malformed")
+            milestones.append(record)
+        tasks = []
+        for path in sorted((state / "meta" / "tasks").glob("*.json")):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or record.get("kind") != "task" or record.get("model_id") != path.stem:
+                raise ValueError("Canonical task record is malformed")
+            tasks.append(record)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as error:
+        print(f"[planrunway] ERROR: {error}", file=sys.stderr)
+        return 1
+    print("[planrunway] PASS core")
+    if sys.argv[1] == "status":
+        active = next((item for item in milestones if isinstance(item, dict) and item.get("state") == "in_progress"), None)
+        task = next((item for item in tasks if isinstance(item, dict) and item.get("state") == "in_progress"), None)
+        if task is not None:
+            active = next((item for item in milestones if isinstance(item, dict) and item.get("model_id") == task.get("milestone_id")), active)
+        if active is not None:
+            print(f"[planrunway] Active milestone: {active.get('display_id')} | {active.get('state')} | {active.get('title')}")
+            if task is None:
+                task = next((item for item in tasks if isinstance(item, dict) and item.get("milestone_id") == active.get("model_id") and item.get("state") == "pending"), None)
+            if task is not None:
+                print(f"[planrunway] Active task: {active.get('display_id')}-{task.get('display_id')} | {task.get('state')} | {task.get('title')}")
+        else:
+            print("[planrunway] No milestones configured")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
