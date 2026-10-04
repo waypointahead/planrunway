@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "planrunway-exec"
+version = "0.1.0"
+description = "Deterministic execution controller for PlanRunway"
+readme = {text = "PlanRunway Exec is an optional, separately installed controller. See https://github.com/waypointahead/planrunway/blob/main/docs/planrunway-exec.md", content-type = "text/markdown"}
+requires-python = ">=3.11"
+license = {text = "MPL-2.0"}
+dependencies = []
+
+[project.scripts]
+planrunway-exec = "planrunway_exec.cli:main"
+planrunway-exec-review = "planrunway_exec.reviewer:main"
+
+[project.urls]
+Homepage = "https://github.com/waypointahead/planrunway"
+Issues = "https://github.com/waypointahead/planrunway/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

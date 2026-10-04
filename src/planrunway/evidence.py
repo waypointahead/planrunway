@@ -139,8 +139,8 @@ def append_event(state: Path, task_id: str, event: dict[str, object]) -> Path:
     if event.get("format_version") != FORMAT_VERSION or event.get("task_id") != task_id:
         raise ValueError("Event must have current format version and matching task ID")
     if event.get("kind") == "manual_confirmation":
-        if event.get("decision") not in {"confirmed", "rejected"}:
-            raise ValueError("Manual confirmation decision must be confirmed or rejected")
+        if event.get("decision") not in {"confirmed", "rejected", "not_applicable"}:
+            raise ValueError("Manual confirmation decision must be confirmed, rejected, or not_applicable")
         _require_text(event.get("operator"), "event.operator")
         _require_text(event.get("notes"), "event.notes")
     elif event.get("kind") == "attempt":
@@ -180,6 +180,13 @@ def _save_task(state: Path, task_id: str, task: dict[str, object]) -> None:
     task["format_version"] = FORMAT_VERSION
     task["task_id"] = task_id
     _atomic_record(_task_path(state, task_id), task)
+
+
+def awaiting_manual_tasks(state: Path) -> list[str]:
+    registry = _load_tasks(state)
+    tasks = registry["tasks"]
+    assert isinstance(tasks, dict)
+    return sorted(task_id for task_id, task in tasks.items() if isinstance(task, dict) and task.get("state") == "awaiting_manual")
 
 
 def register_task(state: Path, task_id: str, criteria: list[str], checks: list[str], requirement_revision: str) -> None:
@@ -226,20 +233,24 @@ def complete_task(state: Path, record: object, awaiting_manual: bool = False) ->
     _save_task(state, str(validated["task_id"]), task)
 
 
-def confirm_task(state: Path, task_id: str, operator: str, notes: str, confirmed: bool) -> None:
+def confirm_task(state: Path, task_id: str, operator: str, notes: str, confirmed: bool, manual_applicability: str = "applicable") -> None:
     registry = _load_tasks(state)
     tasks = registry["tasks"]
     assert isinstance(tasks, dict)
     task = tasks.get(task_id)
     if not isinstance(task, dict) or task.get("state") != "awaiting_manual":
         raise ValueError("Only a task awaiting manual confirmation can be confirmed or rejected")
+    if manual_applicability not in {"applicable", "not_applicable"}:
+        raise ValueError("Manual applicability must be applicable or not_applicable")
+    if manual_applicability == "not_applicable" and not confirmed:
+        raise ValueError("A non-applicable manual check cannot be rejected")
     append_event(state, task_id, {
         "format_version": FORMAT_VERSION,
         "kind": "manual_confirmation",
         "task_id": task_id,
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "operator": operator,
-        "decision": "confirmed" if confirmed else "rejected",
+        "decision": "not_applicable" if manual_applicability == "not_applicable" else "confirmed" if confirmed else "rejected",
         "notes": notes,
     })
     task["state"] = "done" if confirmed else "in_progress"

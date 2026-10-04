@@ -22,7 +22,7 @@ PlanRunway models that state explicitly.
 
 Milestones provide a higher-level delivery structure above individual tasks. They can be reordered as priorities change, so the project can be seen as a set of meaningful, manageable product stages rather than a continuous queue of tasks.
 
-Tasks can be created, reordered, reopened, archived, or superseded. Evidence attaches to tasks, while review artifacts summarize milestone-level results.
+Tasks can be created, renamed, reordered, reopened, archived, or superseded. Evidence attaches to tasks, while review artifacts summarize milestone-level results.
 
 Canonical records have stable UUID identities. Human-facing display IDs and delivery order are separate, so priorities can change without breaking existing references.
 
@@ -101,6 +101,7 @@ PlanRunway records those changes explicitly:
 
 ```bash
 planrunway task-reorder --milestone MS1 --id T01 --before T02
+planrunway task-rename --milestone MS1 --id T01 --new-id T02
 planrunway task-supersede --milestone MS1 --id T01 --successor T03
 planrunway task-reopen --milestone MS1 --id T01
 ```
@@ -108,6 +109,60 @@ planrunway task-reopen --milestone MS1 --id T01
 Stable identity remains separate from delivery order, so work can move without changing existing references and superseded work can remain visible in project state.
 
 Agents use the same validated operations as humans. Canonical ordering and lifecycle metadata should not be edited directly.
+
+## Optional Exec
+
+PlanRunway Core remains canonical source of product and delivery state.
+`planrunway-exec` is optional, separately installed capability that consumes one
+explicitly approved task. It does not change canonical task state, auto-commit,
+or integrate a patch without an explicit SDD/operator decision.
+
+```text
+inspect task revision
+  -> start isolated worktree with allowlist and checks
+  -> propose tests
+  -> operator approves proposal
+  -> implement and fast checks
+  -> read-only review
+  -> required checks and CompletionClaim
+  -> operator approves integration
+  -> integrate unchanged main tree
+```
+
+Exec provides controlled execution from durable context, not agent orchestration
+over the whole product. See [PlanRunway Exec guide](docs/planrunway-exec.md) for
+installation, Linux/WSL requirements, operator commands and recovery behavior.
+
+## Review Milestone Closure
+
+After all milestone tasks are done, check closure before changing milestone state:
+
+```bash
+planrunway milestone-close-check --id MS1
+planrunway milestone-goal-review --id MS1 --operator "reviewer" --whole-milestone \
+  --coverage complete --reason "Current tasks fulfill the milestone goal and acceptance criteria"
+planrunway milestone-review --id MS1 --operator "reviewer" --whole-milestone \
+  --manual-applicability not_applicable --reason "Reviewed whole milestone; no manual validation applies"
+planrunway milestone-close-check --id MS1
+planrunway milestone-set-state --id MS1 --state ready_to_close
+```
+
+Read `.prway/technical/testing_approach.md` before recording a review. If manual validation
+applies, use `--manual-applicability applicable` and repeat `--manual-check` for each
+milestone-wide check. Record results in project evidence before closure; this command records
+the reviewed policy and scope, not proof that checks ran. Review becomes stale when testing
+approach or milestone task scope changes. Release notes and manual guides are not universally
+required by this gate; follow project-specific policy for those artifacts.
+
+Read `.prway/vision/milestones/MS1.md` and its task briefs before `milestone-goal-review`.
+If tasks leave a promise unmet, use `--coverage missing --uncovered "PROMISE"` instead;
+closure stays blocked until new work covers the gap and the review is repeated. The goal
+review is a bounded explicit judgment, not an automatic code audit. Changed milestone
+or task briefs invalidate it.
+
+Closure and goal reviews are optional version-1 data within schema `0.4.0`. Existing `done`
+milestones without reviews remain readable as historical records; reopening them requires
+both reviews before closing again. No historical reviews are synthesized by migration.
 
 ## Resume In A Later Session
 
@@ -203,10 +258,9 @@ Core provides:
 
 Core does not:
 
-- launch coding agents,
-- create worktrees,
-- orchestrate implementation,
-- merge code,
+- launch coding agents or create worktrees itself; optional Exec does this only
+  after explicit request and approval,
+- merge code without an explicit Exec integration decision,
 - create Git commits,
 - provide hosted project management,
 - replace source control, CI, issue trackers, or test frameworks.

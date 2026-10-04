@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 SCHEMA_VERSION = "0.4.0"
 
 
@@ -52,7 +52,7 @@ def main() -> int:
                 f"PlanRunway CLI {VERSION} is below required {envelope['minimum_cli_version']}. "
                 f"Install a compatible release from: {release_url}"
             )
-        if config.get("tier_id") != "manual-core":
+        if config.get("tier_id") not in {"manual-core", "controlled-exec"}:
             raise ValueError("Unsupported MS3 automation profile")
         metadata = json.loads((state / "meta" / "plan.json").read_text(encoding="utf-8"))
         if metadata != {"schema_version": SCHEMA_VERSION}:
@@ -78,10 +78,14 @@ def main() -> int:
         task = next((item for item in tasks if isinstance(item, dict) and item.get("state") == "in_progress"), None)
         if task is not None:
             active = next((item for item in milestones if isinstance(item, dict) and item.get("model_id") == task.get("milestone_id")), active)
+        if active is None:
+            active = next((item for item in milestones if isinstance(item, dict) and item.get("state") == "pending"), None)
         if active is not None:
             print(f"[planrunway] Active milestone: {active.get('display_id')} | {active.get('state')} | {active.get('title')}")
             if task is None:
-                task = next((item for item in tasks if isinstance(item, dict) and item.get("milestone_id") == active.get("model_id") and item.get("state") == "pending"), None)
+                task = next((item for item in tasks if isinstance(item, dict) and item.get("milestone_id") == active.get("model_id") and item.get("state") == "awaiting_manual"), None)
+                if task is None:
+                    task = next((item for item in tasks if isinstance(item, dict) and item.get("milestone_id") == active.get("model_id") and item.get("state") == "pending"), None)
             if task is not None:
                 print(f"[planrunway] Active task: {active.get('display_id')}-{task.get('display_id')} | {task.get('state')} | {task.get('title')}")
         else:

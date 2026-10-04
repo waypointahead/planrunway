@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import zipfile
@@ -36,3 +37,18 @@ def test_rejects_unexpected_candidate_digest(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "Candidate digest mismatch" in result.stderr
+
+
+def test_builds_separate_exec_artifacts_and_rejects_wrong_exec_digest(tmp_path: Path) -> None:
+    built = subprocess.run([sys.executable, str(SCRIPT), "--output", str(tmp_path), "--exec-version", "0.1.0"], text=True, capture_output=True, check=False)
+    assert built.returncode == 0, built.stderr
+    wheel = tmp_path / "planrunway_exec-0.1.0-py3-none-any.whl"
+    assert wheel.is_file()
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert (tmp_path / "planrunway-exec-0.1.0.sha256").read_text(encoding="utf-8") == f"{digest}  {wheel.name}\n"
+    assert json.loads((tmp_path / "planrunway-exec-0.1.0.provenance.json").read_text(encoding="utf-8"))["subject"] == {"name": wheel.name, "sha256": digest}
+    with zipfile.ZipFile(wheel) as archive:
+        assert any(name.endswith("entry_points.txt") and b"planrunway-exec-review" in archive.read(name) for name in archive.namelist())
+    rejected = subprocess.run([sys.executable, str(SCRIPT), "--output", str(tmp_path), "--exec-version", "0.1.0", "--expected-exec-sha256", "0" * 64], text=True, capture_output=True, check=False)
+    assert rejected.returncode == 1
+    assert "Candidate digest mismatch for planrunway-exec" in rejected.stderr
