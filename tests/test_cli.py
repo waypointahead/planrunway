@@ -4,6 +4,7 @@ import subprocess
 import sys
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,10 +13,10 @@ import pytest
 PACKAGE = Path(__file__).parents[1] / "src"
 
 
-def run(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run(root: Path, *args: str, path: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "planrunway.cli", *args],
-        env={"PYTHONPATH": str(PACKAGE), "PATH": str(root / "bin") + os.pathsep + os.environ.get("PATH", "")}, text=True, capture_output=True, check=False,
+        env={"PYTHONPATH": str(PACKAGE), "PATH": path if path is not None else str(root / "bin") + os.pathsep + os.environ.get("PATH", "")}, text=True, capture_output=True, check=False,
     )
 
 
@@ -49,10 +50,13 @@ def test_help_and_actionable_lifecycle_diagnostics_are_concise(tmp_path: Path) -
 
 
 def test_controlled_exec_requires_separate_compatible_install_and_explicit_choice(tmp_path: Path) -> None:
-    assert run(tmp_path, "init", "--root", str(tmp_path)).returncode == 0
+    git = shutil.which("git")
+    assert git is not None
+    isolated_path = str(tmp_path / "bin") + os.pathsep + str(Path(git).parent)
+    assert run(tmp_path, "init", "--root", str(tmp_path), path=isolated_path).returncode == 0
     config = tmp_path / ".prway" / "config.json"
     original = config.read_bytes()
-    refused = run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec", "--yes")
+    refused = run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec", "--yes", path=isolated_path)
     assert refused.returncode == 1
     assert "install Exec separately" in refused.stderr
     assert config.read_bytes() == original
@@ -61,14 +65,14 @@ def test_controlled_exec_requires_separate_compatible_install_and_explicit_choic
     executable = bin_dir / "planrunway-exec"
     executable.write_text("#!/bin/sh\nprintf 'planrunway-exec 0.1.0\\n'\n", encoding="utf-8")
     executable.chmod(0o755)
-    assert run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec").returncode == 1
+    assert run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec", path=isolated_path).returncode == 1
     assert config.read_bytes() == original
-    changed = run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec", "--yes")
+    changed = run(tmp_path, "config-reconfigure", "--root", str(tmp_path), "--tier", "controlled-exec", "--yes", path=isolated_path)
     assert changed.returncode == 0, changed.stderr
-    assert run(tmp_path, "lint", "--root", str(tmp_path)).returncode == 0
+    assert run(tmp_path, "lint", "--root", str(tmp_path), path=isolated_path).returncode == 0
     embedded = subprocess.run([str(tmp_path / ".prway" / "system" / "bin" / "planrunway"), "status", "--root", str(tmp_path)], text=True, capture_output=True, check=False)
     assert embedded.returncode == 0, embedded.stderr
-    assert run(tmp_path, "migrate", "--root", str(tmp_path), "--yes").returncode == 0
+    assert run(tmp_path, "migrate", "--root", str(tmp_path), "--yes", path=isolated_path).returncode == 0
     assert json.loads(config.read_text(encoding="utf-8"))["tier_id"] == "controlled-exec"
 
 
