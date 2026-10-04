@@ -13,7 +13,8 @@ Do not begin implementation until bootstrap is complete.
 
 ## Bootstrap Procedure
 
-1. Read `.prway/system/ground_rules.md` and optional `.prway/user_instructions.md`.
+1. Read `.prway/system/ground_rules.md` and optional `.prway/user_instructions.md` or
+   `.prway/migrated-user-instructions.md`.
 2. Run `planrunway lint --root .`. If it reports `HUMAN_INTERVENTION_REQUIRED`, resolve that before
    normal work. If it reports incompatible repository state, stop and ask operator to run explicit
    migration.
@@ -31,7 +32,12 @@ vague to support work, do not guess. Ask operator for these three inputs in orde
 
 1. Product vision: user/problem, intended outcome, constraints, and success signals.
 2. Technical preferences: stack, architecture boundaries, dependencies, deployment/runtime limits.
-3. Testing approach: required automated checks, manual checks, and acceptance evidence.
+3. Testing approach: required automated checks, acceptance evidence, and manual-validation policy.
+   Ask when manual validation is required versus not applicable. If operator supplies no policy,
+   record this default: require it only for a real UI/CLI journey, external tool/provider,
+   installation/release artifact, platform-specific behavior, or irreducible human judgment; do
+   not require it for deterministic code paths covered by tests, snippets, fixture repositories,
+   mocks, or API calls.
 
 Record approved answers in:
 
@@ -48,6 +54,9 @@ validated lifecycle and reorder commands rather than editing canonical JSON.
 - PlanRunway state is reviewable repository state, not proof that product code is correct.
 - `done` requires declared evidence and applicable human confirmation; never change status merely
   to make lint pass.
+- When a task is `awaiting_manual`, review `.prway/technical/testing_approach.md` before
+  `task-confirm`. Record `not_applicable` rather than inventing a manual check when its policy does
+  not require one.
 - Use `planrunway lint` and `planrunway status` after work. Run `planrunway render` only to refresh
   local derived views.
 - When canonical conflicts exist, stop normal progress and use `planrunway conflict-resolve`.

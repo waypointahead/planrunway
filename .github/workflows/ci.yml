@@ -21,11 +21,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install pytest
       - run: python -m pip install -e .
+      - run: python -m pip install -e packages/planrunway-exec
       - run: python tools/release/validate_public_surface.py .
-      - run: pytest tests tools/release/tests
-      - run: python tools/release/build_core_artifacts.py --output dist
+      - run: pytest --import-mode=importlib tests packages/planrunway-exec/tests tools/release/tests
+      - run: python tools/release/build_core_artifacts.py --output dist --exec-version 0.1.0
       - run: python -m venv /tmp/planrunway-venv
-      - run: /tmp/planrunway-venv/bin/pip install dist/planrunway-*.whl
+      - run: /tmp/planrunway-venv/bin/pip install dist/planrunway-*.whl dist/planrunway_exec-*.whl
       - run: mkdir /tmp/planrunway-project
       - run: /tmp/planrunway-venv/bin/planrunway init --root /tmp/planrunway-project
+      - run: /tmp/planrunway-venv/bin/planrunway migrate --yes --root /tmp/planrunway-project
+      - run: /tmp/planrunway-venv/bin/planrunway lint --root /tmp/planrunway-project
+      - run: /tmp/planrunway-venv/bin/planrunway-exec --version
+      - run: PATH=/tmp/planrunway-venv/bin:$PATH /tmp/planrunway-venv/bin/planrunway config-reconfigure --tier controlled-exec --yes --root /tmp/planrunway-project
       - run: /tmp/planrunway-project/.prway/system/bin/planrunway status --root /tmp/planrunway-project

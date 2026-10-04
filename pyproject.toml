@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "planrunway"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local specification-driven development core"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.11"

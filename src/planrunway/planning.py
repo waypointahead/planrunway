@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -132,6 +134,12 @@ def lint_planning(state: Path) -> None:
         _order(milestone)
         if milestone.get("state") not in MILESTONE_STATES:
             raise ValueError("Canonical milestone records are invalid")
+        review = milestone.get("closure_review")
+        if review is not None and (not isinstance(review, dict) or review.get("format_version") != 1):
+            raise ValueError(f"Malformed milestone closure review: {display_id}")
+        goal_review = milestone.get("goal_review")
+        if goal_review is not None and (not isinstance(goal_review, dict) or goal_review.get("format_version") != 1):
+            raise ValueError(f"Malformed milestone goal review: {display_id}")
         milestone_ids.add(identifier)
         if milestone.get("state") != "archived":
             milestone_display_ids.add(display_id)
@@ -147,6 +155,9 @@ def lint_planning(state: Path) -> None:
         _order(task)
         if task.get("state") not in TASK_STATES:
             raise ValueError("Canonical task records are invalid")
+        revision = task.get("delivery_revision", 0)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("Canonical task record has invalid delivery revision")
         task_ids.add(identifier)
         if task.get("state") != "archived":
             task_refs.add(reference)
@@ -178,10 +189,17 @@ def active_status(state: Path) -> tuple[dict[str, object] | None, dict[str, obje
     active_task = next((item for item in ordered_tasks if item["state"] == "in_progress"), None)
     if active_task is None:
         active_milestone = next((item for item in ordered_milestones if item["state"] == "in_progress"), None)
-        active_task = next((item for item in ordered_tasks if active_milestone and item["milestone_id"] == active_milestone["model_id"] and item["state"] == "pending"), None)
+        if active_milestone is None:
+            active_milestone = next((item for item in ordered_milestones if item["state"] == "pending"), None)
+        active_task = next((item for item in ordered_tasks if active_milestone and item["milestone_id"] == active_milestone["model_id"] and item["state"] == "awaiting_manual"), None)
+        if active_task is None:
+            active_task = next((item for item in ordered_tasks if active_milestone and item["milestone_id"] == active_milestone["model_id"] and item["state"] == "pending"), None)
     if active_task is not None:
         return by_id[str(active_task["milestone_id"])], active_task
-    return next((item for item in ordered_milestones if item["state"] == "in_progress"), None), None
+    active_milestone = next((item for item in ordered_milestones if item["state"] == "in_progress"), None)
+    if active_milestone is None:
+        active_milestone = next((item for item in ordered_milestones if item["state"] == "pending"), None)
+    return active_milestone, None
 
 
 def create_milestone(state: Path, display_id: str, title: str) -> None:
@@ -194,18 +212,39 @@ def create_milestone(state: Path, display_id: str, title: str) -> None:
     _save_record(state, {"kind": "milestone", "model_id": model_id, "display_id": display_id, "title": title, "state": "pending", "order_key": _next_order(milestones)})
 
 
-def create_task(state: Path, milestone_display_id: str, display_id: str, title: str) -> None:
+def create_task(state: Path, milestone_display_id: str, display_id: str, title: str, before: str | None = None, after: str | None = None) -> str:
     if not milestone_display_id or not display_id or not title:
         raise ValueError("task-create requires --milestone, --id, and --title")
+    if before and after:
+        raise ValueError("task-create accepts only one of --before or --after")
     milestones, tasks = _records(state)
     milestone = next((item for item in milestones if item.get("display_id") == milestone_display_id), None)
     if milestone is None:
         raise ValueError(f"Unknown milestone: {milestone_display_id}")
-    siblings = [item for item in tasks if item.get("milestone_id") == milestone["model_id"]]
-    if any(item.get("display_id") == display_id for item in siblings):
-        raise ValueError(f"Duplicate task ID: {milestone_display_id}-{display_id}")
+    siblings = _ordered([item for item in tasks if item.get("milestone_id") == milestone["model_id"]])
+    duplicate = next((item for item in siblings if item.get("display_id") == display_id), None)
+    if duplicate is not None:
+        raise ValueError(
+            f"Duplicate task ID: {milestone_display_id}-{display_id}; existing canonical record is "
+            f"meta/tasks/{duplicate['model_id']}.json. Next: choose a unique --id or update the existing task with task-set-state."
+        )
+    placement = "appended"
+    if before or after:
+        anchor = next((index for index, item in enumerate(siblings) if item.get("display_id") == (before or after)), None)
+        if anchor is None:
+            raise ValueError(f"Unknown task insertion target: {before or after}")
+        index = anchor if before else anchor + 1
+        lower = _order(siblings[index - 1]) if index else 0
+        upper = _order(siblings[index]) if index < len(siblings) else 10**ORDER_WIDTH - 1
+        if upper - lower < 2:
+            raise ValueError("Task insertion order space is exhausted at this position; run an explicit ordering normalization")
+        order_key = str((lower + upper) // 2).zfill(ORDER_WIDTH)
+        placement = f"before {before}" if before else f"after {after}"
+    else:
+        order_key = _next_order(siblings)
     model_id = str(uuid.uuid4())
-    _save_record(state, {"kind": "task", "model_id": model_id, "milestone_id": milestone["model_id"], "display_id": display_id, "title": title, "state": "pending", "order_key": _next_order(siblings)})
+    _save_record(state, {"kind": "task", "model_id": model_id, "milestone_id": milestone["model_id"], "display_id": display_id, "title": title, "state": "pending", "order_key": order_key})
+    return placement
 
 
 def _target(state: Path, kind: str, display_id: str, milestone_display_id: str | None) -> dict[str, object]:
@@ -213,14 +252,19 @@ def _target(state: Path, kind: str, display_id: str, milestone_display_id: str |
     records = milestones if kind == "milestone" else tasks
     milestone_id: str | None = None
     if kind == "task":
-        milestone = next((item for item in milestones if item.get("display_id") == milestone_display_id), None)
-        if milestone is None:
+        matching_milestones = [item for item in milestones if item.get("display_id") == milestone_display_id]
+        if not matching_milestones:
             raise ValueError(f"Unknown milestone: {milestone_display_id}")
+        if len(matching_milestones) != 1:
+            raise ValueError(f"Ambiguous milestone: {milestone_display_id}")
+        milestone = matching_milestones[0]
         milestone_id = _text(milestone, "model_id")
-    record = next((item for item in records if item.get("display_id") == display_id and (kind == "milestone" or item.get("milestone_id") == milestone_id)), None)
-    if record is None:
+    matching_records = [item for item in records if item.get("display_id") == display_id and (kind == "milestone" or item.get("milestone_id") == milestone_id)]
+    if not matching_records:
         raise ValueError(f"Unknown {kind}: {display_id}")
-    return record
+    if len(matching_records) != 1:
+        raise ValueError(f"Ambiguous {kind}: {display_id}")
+    return matching_records[0]
 
 
 def set_state(state: Path, kind: str, display_id: str, target_state: str, milestone_display_id: str | None = None) -> None:
@@ -229,8 +273,154 @@ def set_state(state: Path, kind: str, display_id: str, target_state: str, milest
     transitions = ({"pending": {"in_progress", "blocked"}, "in_progress": {"blocked", "ready_to_close"}, "blocked": {"pending", "in_progress"}, "ready_to_close": {"done", "in_progress"}} if kind == "milestone" else {"pending": {"in_progress", "blocked"}, "in_progress": {"blocked", "awaiting_manual", "done"}, "blocked": {"pending", "in_progress"}, "awaiting_manual": {"done", "in_progress"}})
     if target_state not in states or target_state not in transitions.get(record.get("state"), set()):
         raise ValueError(f"Invalid {kind} state transition: {record.get('state')} to {target_state}")
+    if kind == "milestone" and target_state in {"ready_to_close", "done"}:
+        blockers = milestone_close_blockers(state, display_id)
+        if blockers:
+            raise ValueError("MILESTONE_CLOSURE_BLOCKED: " + "; ".join(blockers))
     record["state"] = target_state
     _save_record(state, record)
+
+
+def _closure_scope(tasks: list[dict[str, object]]) -> str:
+    scope = [
+        {key: task[key] for key in ("model_id", "display_id", "title", "state", "order_key")}
+        for task in _ordered(tasks)
+        if task["state"] != "archived"
+    ]
+    return hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def milestone_close_blockers(state: Path, display_id: str) -> list[str]:
+    milestone = _target(state, "milestone", display_id, None)
+    _, tasks = _records(state)
+    active = [task for task in tasks if task["milestone_id"] == milestone["model_id"] and task["state"] != "archived"]
+    blockers = [
+        f"Unfinished task: {display_id}-{task['display_id']} ({task['state']}); "
+        + (f"next: planrunway task-set-state --milestone {display_id} --id {task['display_id']} --state in_progress"
+           if task["state"] in {"pending", "blocked"}
+           else f"review task evidence and validation: .prway/execution/tasks/{display_id}/{task['display_id']}.md")
+        for task in _ordered(active) if task["state"] != "done"
+    ]
+    if not active:
+        blockers.append(f"MISSING: milestone has no deliverable tasks. Next: planrunway task-create --milestone {display_id} --id TASK_ID --title TITLE")
+    blockers.extend(milestone_goal_blockers(state, display_id, milestone, active))
+    review = milestone.get("closure_review")
+    next_review = ("Review .prway/technical/testing_approach.md and make sure whole milestone "
+                   "is represented as applicable. "
+                   f"Next: planrunway milestone-review --id {display_id} --help")
+    guidance = "Missing: closure review against .prway/technical/testing_approach.md. " + next_review
+    if not isinstance(review, dict) or review.get("format_version") != 1:
+        blockers.append(guidance)
+        return blockers
+    policy = state / "technical" / "testing_approach.md"
+    if not policy.is_file() or not policy.read_bytes().strip():
+        blockers.append("Missing or empty .prway/technical/testing_approach.md; review project testing policy")
+    elif review.get("testing_approach_sha256") != hashlib.sha256(policy.read_bytes()).hexdigest():
+        blockers.append("Stale closure review: testing_approach.md changed. " + next_review)
+    if review.get("task_scope_sha256") != _closure_scope(active):
+        blockers.append("Stale closure review: milestone task scope changed. " + next_review)
+    if review.get("milestone_model_id") != milestone["model_id"] or review.get("whole_milestone") is not True:
+        blockers.append("Incomplete closure review: whole-milestone scope is unconfirmed. " + next_review)
+    manual = review.get("manual_applicability")
+    checks = review.get("manual_checks")
+    reason = review.get("reason")
+    if (not isinstance(review.get("operator"), str) or not review["operator"].strip()
+        or not isinstance(reason, str) or not reason.strip()
+        or not isinstance(manual, str) or manual not in {"applicable", "not_applicable"}
+        or not isinstance(checks, list) or any(not isinstance(check, str) or not check.strip() for check in checks)
+        or (manual == "applicable" and not checks) or (manual == "not_applicable" and checks)):
+        blockers.append("Incomplete closure review: manual applicability or rationale is missing. " + next_review)
+    return blockers
+
+
+def _goal_brief(state: Path, display_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", display_id):
+        raise ValueError("Milestone display ID is not a safe brief filename")
+    return state / "vision" / "milestones" / f"{display_id}.md"
+
+
+def _goal_scope(state: Path, milestone_id: str, tasks: list[dict[str, object]]) -> str:
+    scope = []
+    for task in _ordered(tasks):
+        if task["state"] == "archived":
+            continue
+        task_id = _text(task, "display_id")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", task_id):
+            raise ValueError("Task display ID is not a safe brief filename")
+        brief = state / "execution" / "tasks" / milestone_id / f"{task_id}.md"
+        scope.append((task["model_id"], task_id, task["title"], task["order_key"], task.get("delivery_revision", 0),
+                      hashlib.sha256(brief.read_bytes()).hexdigest() if brief.is_file() else None))
+    return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+
+
+def milestone_goal_blockers(state: Path, display_id: str, milestone: dict[str, object] | None = None, active: list[dict[str, object]] | None = None) -> list[str]:
+    if milestone is None:
+        milestone = _target(state, "milestone", display_id, None)
+    if active is None:
+        _, tasks = _records(state)
+        active = [task for task in tasks if task["milestone_id"] == milestone["model_id"] and task["state"] != "archived"]
+    brief = _goal_brief(state, display_id)
+    if not brief.is_file() or not brief.read_bytes().strip():
+        return [f"MISSING: milestone goal brief .prway/vision/milestones/{display_id}.md; describe goal and acceptance promises before reviewing coverage"]
+    next_review = f"Next: planrunway milestone-goal-review --id {display_id} --help"
+    review = milestone.get("goal_review")
+    if not isinstance(review, dict) or review.get("format_version") != 1:
+        return [f"MISSING: milestone goal completeness review. Check whether tasks together fulfill .prway/vision/milestones/{display_id}.md. {next_review}"]
+    blockers = []
+    if review.get("milestone_model_id") != milestone["model_id"] or review.get("whole_milestone") is not True or not isinstance(review.get("operator"), str) or not review["operator"].strip() or not isinstance(review.get("reason"), str) or not review["reason"].strip():
+        blockers.append(f"MISSING: valid whole-milestone goal completeness review. {next_review}")
+    if review.get("brief_sha256") != hashlib.sha256(brief.read_bytes()).hexdigest() or review.get("task_scope_sha256") != _goal_scope(state, display_id, active):
+        blockers.append(f"MISSING: current milestone goal completeness review; goal or task scope changed. {next_review}")
+    uncovered = review.get("uncovered")
+    if review.get("coverage") == "missing" and isinstance(uncovered, list) and uncovered and all(isinstance(item, str) and item.strip() for item in uncovered):
+        blockers.append(f"MISSING: milestone goal promises: {'; '.join(uncovered)}. Next: planrunway task-create --milestone {display_id} --id TASK_ID --title TITLE; then review coverage again")
+    elif review.get("coverage") != "complete" or uncovered != []:
+        blockers.append(f"MISSING: valid milestone goal coverage decision. {next_review}")
+    return blockers
+
+
+def record_milestone_goal_review(state: Path, display_id: str, operator: str, reason: str, coverage: str, uncovered: list[str], whole_milestone: bool) -> None:
+    milestone = _target(state, "milestone", display_id, None)
+    if milestone["state"] in {"done", "archived"}:
+        raise ValueError("Reopen milestone before recording goal coverage")
+    brief = _goal_brief(state, display_id)
+    if not brief.is_file() or not brief.read_bytes().strip():
+        raise ValueError(f"MISSING: milestone goal brief .prway/vision/milestones/{display_id}.md")
+    if not whole_milestone or not operator.strip() or not reason.strip() or coverage not in {"complete", "missing"} or (coverage == "complete" and uncovered) or (coverage == "missing" and not uncovered) or any(not item.strip() for item in uncovered):
+        raise ValueError("Goal review requires --whole-milestone, --operator, --reason and --coverage complete (no gaps) or missing with --uncovered for each gap")
+    _, tasks = _records(state)
+    active = [task for task in tasks if task["milestone_id"] == milestone["model_id"] and task["state"] != "archived"]
+    if coverage == "complete" and (not active or any(task["state"] != "done" for task in active)):
+        raise ValueError("Goal coverage can be confirmed only after all deliverable milestone tasks are done")
+    milestone["goal_review"] = {
+        "format_version": 1, "milestone_model_id": milestone["model_id"], "whole_milestone": True,
+        "brief_sha256": hashlib.sha256(brief.read_bytes()).hexdigest(),
+        "task_scope_sha256": _goal_scope(state, display_id, [task for task in tasks if task["milestone_id"] == milestone["model_id"]]),
+        "coverage": coverage, "uncovered": uncovered, "operator": operator, "reason": reason,
+    }
+    _save_record(state, milestone)
+
+
+def record_milestone_review(state: Path, display_id: str, operator: str, reason: str, manual_applicability: str, manual_checks: list[str], whole_milestone: bool) -> None:
+    milestone = _target(state, "milestone", display_id, None)
+    if milestone["state"] in {"done", "archived"}:
+        raise ValueError("Reopen milestone before recording a new closure review")
+    if not whole_milestone or not operator.strip() or not reason.strip():
+        raise ValueError("milestone-review requires --whole-milestone, --operator and --reason")
+    if manual_applicability not in {"applicable", "not_applicable"} or (manual_applicability == "applicable" and not manual_checks) or (manual_applicability == "not_applicable" and manual_checks) or any(not check.strip() for check in manual_checks):
+        raise ValueError("Applicable manual validation requires --manual-check; not_applicable requires a reason and no manual checks")
+    policy = state / "technical" / "testing_approach.md"
+    if not policy.is_file() or not policy.read_bytes().strip():
+        raise ValueError("Missing or empty .prway/technical/testing_approach.md")
+    _, tasks = _records(state)
+    milestone["closure_review"] = {
+        "format_version": 1, "milestone_model_id": milestone["model_id"], "whole_milestone": True,
+        "testing_approach_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+        "task_scope_sha256": _closure_scope([task for task in tasks if task["milestone_id"] == milestone["model_id"]]),
+        "operator": operator, "reason": reason, "manual_applicability": manual_applicability,
+        "manual_checks": manual_checks,
+    }
+    _save_record(state, milestone)
 
 
 def change_record(state: Path, kind: str, action: str, display_id: str, milestone_display_id: str | None = None, successor: str | None = None) -> None:
@@ -239,6 +429,8 @@ def change_record(state: Path, kind: str, action: str, display_id: str, mileston
         if record.get("state") != "done":
             raise ValueError(f"Only done {kind} can reopen")
         record["state"] = "pending"
+        if kind == "task":
+            record["delivery_revision"] = int(record.get("delivery_revision", 0)) + 1
     else:
         record["state"] = "archived"
         if action == "supersede":
@@ -246,6 +438,23 @@ def change_record(state: Path, kind: str, action: str, display_id: str, mileston
                 raise ValueError("supersede requires --successor")
             record["relation"] = {"type": "superseded_by", "value": successor}
     _save_record(state, record)
+
+
+def rename_record(state: Path, kind: str, display_id: str, new_display_id: str, milestone_display_id: str | None = None) -> None:
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", new_display_id):
+        raise ValueError("Display ID must start with a letter and contain only letters or digits")
+    target = _target(state, kind, display_id, milestone_display_id)
+    if target.get("state") == "archived":
+        raise ValueError(f"Cannot rename archived {kind}: {display_id}")
+    milestones, tasks = _records(state)
+    records = milestones if kind == "milestone" else [item for item in tasks if item["milestone_id"] == target["milestone_id"]]
+    collision = next((item for item in records if item["model_id"] != target["model_id"] and item.get("display_id") == new_display_id), None)
+    if collision is not None:
+        raise ValueError(
+            f"Cannot rename {kind} to {new_display_id}; canonical record meta/{kind}s/{collision['model_id']}.json already owns that ID"
+        )
+    target["display_id"] = new_display_id
+    _save_record(state, target)
 
 
 def prepare_review(state: Path, milestone_id: str) -> None:
